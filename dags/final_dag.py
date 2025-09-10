@@ -36,6 +36,9 @@ tz = "America/Argentina/Mendoza"
 # Funciones
 # -----------------------
 
+# --- helper seguro por si hay NaN ---
+
+
 def normalize_text(texto):
     """Normaliza texto de manera consistente en todo el pipeline"""
     if texto is None or pd.isna(texto):
@@ -73,53 +76,7 @@ def download_feriados(**kwargs):
         json.dump(r.json(), f, indent=2, ensure_ascii=False)
     return LOCAL_FERIADOS
 
-def fetch_all_municipios(**kwargs):
-    """Obtiene coordenadas de todos los municipios de Argentina"""
-    url = "https://apis.datos.gob.ar/georef/api/municipios"
-    params = {
-        "aplanar": "true",
-        "max": 5000,
-        "inicio": 0
-    }
-    frames = []
-    total = None
-    
-    while True:
-        r = requests.get(url, params={k:v for k,v in params.items() if v is not None}, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        if total is None:
-            total = js.get("total")
-            print(f"Esperados (total): {total}")
-        munis = js.get("municipios", [])
-        if not munis:
-            break
-        frames.append(pd.DataFrame(munis))
-        params["inicio"] += len(munis)
-        print(f"Acumulados: {params['inicio']}")
-        if params["inicio"] >= total:
-            break
-        time.sleep(0.15)  # cortesía
-    
-    df = pd.concat(frames, ignore_index=True)
-    
-    # Renombrar columnas
-    df = df.rename(columns={
-        "nombre": "municipio",
-        "provincia_nombre": "provincia",
-        "centroide_lat": "lat",
-        "centroide_lon": "lon"
-    })[["provincia","municipio","lat","lon"]]
-    
-    # Normalizar nombres AQUÍ TAMBIÉN
-    df['municipio'] = df['municipio'].apply(normalize_text)
-    df['provincia'] = df['provincia'].apply(normalize_text)
-    
-    # Guardar archivo
-    os.makedirs(os.path.dirname(LOCAL_COORDS), exist_ok=True)
-    df.to_csv(LOCAL_COORDS, index=False)
-    print(f"Coordenadas guardadas: {df.shape[0]} municipios")
-    return LOCAL_COORDS
+
 
 def merge_coordinates(**kwargs):
     """Merge de coordenadas con datos SUBE"""
@@ -193,6 +150,7 @@ def extract_sube(**kwargs):
 def extract_feriados(**kwargs):
     df = pd.read_json(LOCAL_FERIADOS)
     df = df.rename(columns={"fecha": "fecha"})
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
 
     out = f"{OUTPUT_DIR}/feriados_extract.csv"
     df.to_csv(out, index=False)
