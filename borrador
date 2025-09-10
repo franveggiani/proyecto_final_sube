@@ -1,0 +1,159 @@
+def _safe_norm(x):
+    try:
+        return normalize_text(x) if isinstance(x, str) else x
+    except Exception:
+        return x
+
+def fetch_province_centroids():
+    """Devuelve DataFrame con centroides por provincia (normalizada)."""
+    url = "https://apis.datos.gob.ar/georef/api/provincias"
+    params = {"aplanar": "true", "max": 100}
+    
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        js = r.json()
+        provs = js.get("provincias", [])
+        
+        dfp = pd.DataFrame(provs).rename(columns={
+            "nombre": "provincia",
+            "centroide_lat": "prov_lat",
+            "centroide_lon": "prov_lon",
+        })[["provincia", "prov_lat", "prov_lon"]]
+        
+        # Normalizar y convertir coordenadas
+        dfp["provincia"] = dfp["provincia"].apply(_safe_norm)
+        dfp['prov_lat'] = pd.to_numeric(dfp['prov_lat'], errors='coerce')
+        dfp['prov_lon'] = pd.to_numeric(dfp['prov_lon'], errors='coerce')
+        
+        # Verificar que tengamos todas las provincias con coordenadas válidas
+        invalid_coords = dfp[dfp['prov_lat'].isna() | dfp['prov_lon'].isna()]
+        if not invalid_coords.empty:
+            print(f"ADVERTENCIA: Provincias sin coordenadas válidas: {invalid_coords['provincia'].tolist()}")
+        
+        print(f"Centroides provinciales obtenidos: {len(dfp)} provincias")
+        return dfp
+        
+    except Exception as e:
+        print(f"ERROR obteniendo centroides provinciales: {e}")
+        # Fallback con algunas provincias principales manualmente
+        fallback_data = [
+            {"provincia": "buenos aires", "prov_lat": -36.6769, "prov_lon": -60.5588},
+            {"provincia": "ciudad autonoma de buenos aires", "prov_lat": -34.6118, "prov_lon": -58.3960},
+            {"provincia": "cordoba", "prov_lat": -31.4135, "prov_lon": -64.1811},
+            {"provincia": "santa fe", "prov_lat": -30.7016, "prov_lon": -60.9478},
+            {"provincia": "mendoza", "prov_lat": -34.6297, "prov_lon": -68.5816},
+        ]
+        return pd.DataFrame(fallback_data)
+
+
+
+def fetch_all_municipios(**kwargs):
+    """Obtiene coordenadas de todos los municipios de Argentina y corrige casos especiales."""
+
+    url = "https://apis.datos.gob.ar/georef/api/municipios"
+    params = {"aplanar": "true", "max": 5000, "inicio": 0}
+    frames, total = [], None
+
+    while True:
+        r = requests.get(url, params={k: v for k, v in params.items() if v is not None}, timeout=30)
+        r.raise_for_status()
+        js = r.json()
+        if total is None:
+            total = js.get("total")
+            print(f"Esperados (total): {total}")
+        munis = js.get("municipios", [])
+        if not munis:
+            break
+        frames.append(pd.DataFrame(munis))
+        params["inicio"] += len(munis)
+        print(f"Acumulados: {params['inicio']}")
+        if params["inicio"] >= total:
+            break
+        time.sleep(0.15)  # cortesía
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Renombrar
+    df = df.rename(columns={
+        "nombre": "municipio",
+        "provincia_nombre": "provincia",
+        "centroide_lat": "lat",
+        "centroide_lon": "lon"
+    })[["provincia", "municipio", "lat", "lon"]]
+
+    # Normalizaciones (a salvo de NaN)
+    df["municipio"] = df["municipio"].apply(_safe_norm)
+    df["provincia"] = df["provincia"].apply(_safe_norm)
+
+    # --- traer centroides de provincia y mergear ---
+    prov_df = fetch_province_centroids()
+    df = df.merge(prov_df, on="provincia", how="left")
+
+    # Verificar coordenadas faltantes ANTES de aplicar casos especiales
+    print(f"Municipios sin coordenadas antes de corrección: {df[['lat', 'lon']].isna().any(axis=1).sum()}")
+
+    # --- lista de municipios a "forzar" al centroide provincial ---
+    especiales_raw = [
+        "SN", "SD", "URBANO DE LA COSTA",  # más NaN
+        "RIO GALLEGOS", "RIO GRANDE", "SAN NICOLAS DE LOS ARROYOS",
+        "CORONEL ROSALES", "USHUAIA", "GUALEGUAYCHU", "LA BANDA",
+    ]
+    especiales_norm = set(_safe_norm(x) for x in especiales_raw)
+
+    # CORRECCIÓN 1: Verificar que las coordenadas sean válidas numéricamente
+    # Algunas coordenadas pueden ser strings o valores inválidos
+    df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
+    df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
+
+    # CORRECCIÓN 2: máscara más completa para identificar coordenadas faltantes
+    mask_coordenadas_faltantes = (
+        df["lat"].isna() | 
+        df["lon"].isna() | 
+        (df["lat"] == 0) |  # coordenadas 0,0 suelen ser errores
+        (df["lon"] == 0) |
+        df["municipio"].isna() | 
+        df["municipio"].isin(especiales_norm)
+    )
+
+    print(f"Municipios que necesitan corrección: {mask_coordenadas_faltantes.sum()}")
+
+    # CORRECCIÓN 3: Verificar que tengamos coordenadas provinciales válidas
+    print(f"Municipios sin coordenadas provinciales: {df['prov_lat'].isna().sum()}")
+
+    # reemplazo: coordenadas = centroide de la provincia
+    # Solo reemplazar si tenemos coordenadas provinciales válidas
+    mask_provincia_valida = df['prov_lat'].notna() & df['prov_lon'].notna()
+    mask_final = mask_coordenadas_faltantes & mask_provincia_valida
+
+    df.loc[mask_final, "lat"] = df.loc[mask_final, "prov_lat"]
+    df.loc[mask_final, "lon"] = df.loc[mask_final, "prov_lon"]
+
+    print(f"Coordenadas reemplazadas: {mask_final.sum()}")
+
+    # CORRECCIÓN 4: Para casos donde no tenemos coordenadas provinciales, usar CABA por defecto
+    mask_sin_coords = df["lat"].isna() | df["lon"].isna()
+    if mask_sin_coords.any():
+        print(f"Municipios que quedan sin coordenadas, usando CABA por defecto: {mask_sin_coords.sum()}")
+        df.loc[mask_sin_coords, "lat"] = LAT   # -34.6 (CABA)
+        df.loc[mask_sin_coords, "lon"] = LON   # -58.4 (CABA)
+
+    # limpieza columnas auxiliares
+    df = df.drop(columns=["prov_lat", "prov_lon"])
+
+    # Verificación final
+    coords_faltantes_final = df[['lat', 'lon']].isna().any(axis=1).sum()
+    print(f"Municipios sin coordenadas después de corrección: {coords_faltantes_final}")
+
+    # Mostrar algunos ejemplos de lo que se corrigió
+    if mask_final.any():
+        print("Ejemplos de municipios corregidos:")
+        ejemplos = df[mask_final][['provincia', 'municipio', 'lat', 'lon']].head(10)
+        for _, row in ejemplos.iterrows():
+            print(f"  - {row['provincia']}, {row['municipio']}: ({row['lat']:.3f}, {row['lon']:.3f})")
+
+    # Guardar
+    os.makedirs(os.path.dirname(LOCAL_COORDS), exist_ok=True)
+    df.to_csv(LOCAL_COORDS, index=False)
+    print(f"Coordenadas guardadas: {df.shape[0]} municipios")
+    return LOCAL_COORDS
