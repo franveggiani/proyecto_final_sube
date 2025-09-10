@@ -2,3 +2,4 @@
 apache-airflow-providers-http
 pandas
 requests
+duckdb

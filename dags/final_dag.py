@@ -36,6 +36,20 @@ tz = "America/Argentina/Mendoza"
 # Funciones
 # -----------------------
 
+def normalize_text(texto):
+    """Normaliza texto de manera consistente en todo el pipeline"""
+    if texto is None or pd.isna(texto):
+        return None
+    
+    texto = str(texto).strip()
+    
+    # Normaliza (NFKD = compatibilidad, descompone caracteres con tilde)
+    nfkd = unicodedata.normalize("NFKD", texto)
+    # Elimina marcas de acento
+    normalized = "".join([c for c in nfkd if not unicodedata.combining(c)])
+    
+    return normalized.lower()
+
 def download_sube_csv(**kwargs):
     os.makedirs(os.path.dirname(LOCAL_SUBE), exist_ok=True)
     if os.path.exists(LOCAL_SUBE):
@@ -97,21 +111,15 @@ def fetch_all_municipios(**kwargs):
         "centroide_lon": "lon"
     })[["provincia","municipio","lat","lon"]]
     
+    # Normalizar nombres AQUÍ TAMBIÉN
+    df['municipio'] = df['municipio'].apply(normalize_text)
+    df['provincia'] = df['provincia'].apply(normalize_text)
+    
     # Guardar archivo
     os.makedirs(os.path.dirname(LOCAL_COORDS), exist_ok=True)
     df.to_csv(LOCAL_COORDS, index=False)
     print(f"Coordenadas guardadas: {df.shape[0]} municipios")
     return LOCAL_COORDS
-
-def quitar_tildes(texto):
-    """Normaliza texto removiendo tildes y acentos"""
-    if texto is None or pd.isna(texto):
-        return None
-    
-    # Normaliza (NFKD = compatibilidad, descompone caracteres con tilde)
-    nfkd = unicodedata.normalize("NFKD", texto)
-    # Elimina marcas de acento
-    return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
 def merge_coordinates(**kwargs):
     """Merge de coordenadas con datos SUBE"""
@@ -127,20 +135,26 @@ def merge_coordinates(**kwargs):
     # Leer coordenadas
     df_coords = pd.read_csv(LOCAL_COORDS)
     
-    # Normalizar nombres
-    df_coords['municipio'] = df_coords['municipio'].apply(quitar_tildes).str.lower().str.strip()
-    df_coords['provincia'] = df_coords['provincia'].apply(quitar_tildes).str.lower().str.strip()
+    # Normalizar nombres usando la función consistente
+    input_coord['municipio_norm'] = input_coord['municipio'].apply(normalize_text)
+    input_coord['provincia_norm'] = input_coord['provincia'].apply(normalize_text)
     
-    input_coord['municipio'] = input_coord['municipio'].apply(quitar_tildes).str.lower().str.strip()
-    input_coord['provincia'] = input_coord['provincia'].apply(quitar_tildes).str.lower().str.strip()
+    # Los datos de coordenadas ya están normalizados
     
     # Merge
     df_merged = pd.merge(
         left=input_coord,
         right=df_coords,
         how="left",
-        on=['provincia', 'municipio']
+        left_on=['provincia_norm', 'municipio_norm'],
+        right_on=['provincia', 'municipio']
     )
+    
+    # Mantener las columnas originales y las coordenadas
+    df_merged = df_merged[['provincia_x', 'municipio_x', 'lat', 'lon']].rename(columns={
+        'provincia_x': 'provincia',
+        'municipio_x': 'municipio'
+    })
     
     # Eliminar NaNs
     df_merged = df_merged.dropna()
@@ -166,6 +180,9 @@ def extract_sube(**kwargs):
         "CANTIDAD": "cantidad",
         "DATO_PRELIMINAR": "dato_preliminar"
     })
+
+    df["fecha"] = pd.to_datetime(df['fecha'], errors="coerce")
+
     # Eliminar columnas como en Colab
     df = df.drop(columns=["dato_preliminar", "amba", "jurisdiccion"])
     out = f"{OUTPUT_DIR}/sube_extract.csv"
@@ -175,7 +192,8 @@ def extract_sube(**kwargs):
 
 def extract_feriados(**kwargs):
     df = pd.read_json(LOCAL_FERIADOS)
-    df = df.rename(columns={"fecha": "fecha_feriado"})
+    df = df.rename(columns={"fecha": "fecha"})
+
     out = f"{OUTPUT_DIR}/feriados_extract.csv"
     df.to_csv(out, index=False)
     return out
@@ -199,8 +217,8 @@ def enrich_with_weather(**kwargs):
     for i, row in df_coords.iterrows():
         lat = row["lat"]
         lon = row["lon"]
-        provincia = row["provincia"]
-        municipio = row["municipio"]
+        provincia = row["provincia"]  # YA ESTÁN NORMALIZADOS
+        municipio = row["municipio"]  # YA ESTÁN NORMALIZADOS
         
         try:
             resp = requests.get(
@@ -217,21 +235,29 @@ def enrich_with_weather(**kwargs):
             )
             resp.raise_for_status()
             js = resp.json()
+
             daily = js.get("daily", {})
+
             if daily and daily.get("time"):
-                # Procesar todas las fechas del año como en Colab
-                for j in range(len(daily["time"])):
+                for fecha, tmax, tmin, prec, viento in zip(
+                    daily["time"],
+                    daily.get("temperature_2m_max", []),
+                    daily.get("temperature_2m_min", []),
+                    daily.get("precipitation_sum", []),
+                    daily.get("windspeed_10m_max", []),
+                ):
                     rows.append({
-                        "provincia": provincia,
-                        "municipio": municipio,
+                        "provincia": provincia,  # Ya normalizado
+                        "municipio": municipio,  # Ya normalizado
                         "lat": float(lat),
                         "lon": float(lon),
-                        "fecha": daily["time"][j],
-                        "tmax": daily["temperature_2m_max"][j],
-                        "tmin": daily["temperature_2m_min"][j],
-                        "precip": daily["precipitation_sum"][j],
-                        "viento": daily["windspeed_10m_max"][j],
+                        "fecha": fecha,     
+                        "tmax": tmax,
+                        "tmin": tmin,
+                        "precip": prec,
+                        "viento": viento,
                     })
+       
         except Exception as e:
             print(f"ERROR en fila {i} ({provincia} - {municipio}): {e}")
             pass
@@ -240,68 +266,88 @@ def enrich_with_weather(**kwargs):
         time.sleep(0.05)
     
     df_clima = pd.DataFrame(rows)
+    df_clima['fecha'] = pd.to_datetime(df_clima['fecha'])
+
     out = f"{OUTPUT_DIR}/weather_municipios_2024.csv"
     df_clima.to_csv(out, index=False)
     print(f"Datos de clima obtenidos para {len(rows)} registros de {df_coords.shape[0]} municipios")
     return out
 
 def merge_and_transform(**kwargs):
+    import duckdb
+
     ti = kwargs["ti"]
-    sube_path = ti.xcom_pull(task_ids="extract_sube")
+    sube_path     = ti.xcom_pull(task_ids="extract_sube")
     feriados_path = ti.xcom_pull(task_ids="extract_feriados")
-    weather_path = ti.xcom_pull(task_ids="enrich_with_weather")
+    weather_path  = ti.xcom_pull(task_ids="enrich_with_weather")
     date = kwargs["ds"]
 
-    # Cargar archivos pequeños completos
-    df_fer = pd.read_csv(feriados_path)
-    df_weather = pd.read_csv(weather_path)
-    
-    # Debug: verificar columnas
-    sube_sample = pd.read_csv(sube_path, nrows=1)
-    print(f"Columnas SUBE: {list(sube_sample.columns)}")
-    print(f"Columnas feriados: {list(df_fer.columns)}")
-    print(f"Columnas weather: {list(df_weather.columns)}")
-    
-    # Debug: verificar tipos de fecha
-    if 'fecha' in sube_sample.columns:
-        print(f"Tipo fecha SUBE: {sube_sample['fecha'].dtype}")
-    if 'fecha' in df_weather.columns:
-        print(f"Tipo fecha weather: {df_weather['fecha'].dtype}")
-    if 'fecha_feriado' in df_fer.columns:
-        print(f"Tipo fecha feriados: {df_fer['fecha_feriado'].dtype}")
-    
-    # Procesar SUBE en chunks para evitar problemas de memoria
-    final_chunks = []
-    
-    for chunk in pd.read_csv(sube_path, chunksize=100000):
-        # Primer merge: chunk SUBE con clima por fecha (como en Colab línea 227-231)
-        df_chunk = chunk.merge(
-            df_weather,
-            how="left",
-            on=['fecha']
-        )
-        
-        # Segundo merge: resultado con feriados por fecha (como en Colab línea 235-239)
-        df_chunk_final = df_chunk.merge(
-            df_fer,
-            how="left",
-            left_on=['fecha'],
-            right_on=['fecha_feriado']
-        )
-        
-        # Eliminar columnas como en Colab (línea 243)
-        df_chunk_final = df_chunk_final.drop(columns=["tipo", "lat", "lon"])
-        df_chunk_final["grupo"] = "Grupo 17"
-        
-        final_chunks.append(df_chunk_final)
-        print(f"Procesado chunk de {chunk.shape[0]} registros")
-    
-    # Combinar todos los chunks
-    df_final = pd.concat(final_chunks, ignore_index=True)
-
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = f"{OUTPUT_DIR}/final_{date}.csv"
-    df_final.to_csv(out, index=False)
-    print(f"Archivo final creado con {df_final.shape[0]} registros")
+
+    con = duckdb.connect()
+    con.execute("PRAGMA threads=4")
+
+    # CREAR FUNCIÓN DE NORMALIZACIÓN EN DUCKDB
+    con.execute("""
+    CREATE OR REPLACE FUNCTION normalize_text(text_val) AS (
+        CASE 
+            WHEN text_val IS NULL THEN NULL
+            ELSE LOWER(TRIM(
+                REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                    text_val, 'á', 'a'), 'é', 'e'), 'í', 'i'), 'ó', 'o'), 'ú', 'u'), 'ü', 'u'), 'ñ', 'n'), 'Ñ', 'n')
+            ))
+        END
+    );
+    """)
+
+    # Hacer el merge con normalización consistente
+    con.execute(f"""
+        COPY (
+        SELECT
+            s.*,
+            w.tmax, w.tmin, w.precip, w.viento,
+            'Grupo 17' AS grupo
+        FROM read_csv_auto('{sube_path}', SAMPLE_SIZE=-1) AS s
+        LEFT JOIN read_csv_auto('{weather_path}', SAMPLE_SIZE=-1) AS w
+            ON CAST(s.fecha AS DATE) = TRY_CAST(w.fecha AS DATE)
+            AND normalize_text(s.provincia) = normalize_text(w.provincia)
+            AND normalize_text(s.municipio) = normalize_text(w.municipio)
+        LEFT JOIN read_csv_auto('{feriados_path}', SAMPLE_SIZE=-1) AS f
+            ON CAST(s.fecha AS DATE) = TRY_CAST(f.fecha AS DATE)
+        )
+        TO '{out}' (HEADER, DELIMITER ',');
+    """)
+    print(f"DuckDB: archivo final creado en {out}")
+
+    # Debug: ¿Cuántos match reales hay?
+    matches = con.execute(f"""
+    SELECT COUNT(*) as matches
+    FROM read_csv_auto('{sube_path}') s
+    JOIN read_csv_auto('{weather_path}') w
+        ON CAST(s.fecha AS DATE) = TRY_CAST(w.fecha AS DATE)
+        AND normalize_text(s.provincia) = normalize_text(w.provincia)
+        AND normalize_text(s.municipio) = normalize_text(w.municipio)
+    """).fetchall()
+    print(f"Matches encontrados: {matches}")
+
+    # Muéstrame algunos registros para inspeccionar
+    sample_weather = con.execute(f"""
+    SELECT DISTINCT provincia, municipio 
+    FROM read_csv_auto('{weather_path}') 
+    LIMIT 10
+    """).df()
+    print("Sample weather data:")
+    print(sample_weather)
+
+    sample_sube = con.execute(f"""
+    SELECT DISTINCT provincia, municipio 
+    FROM read_csv_auto('{sube_path}') 
+    LIMIT 10
+    """).df()
+    print("Sample SUBE data:")
+    print(sample_sube)
+
     return out
 
 def export_logs_zip(**kwargs):
