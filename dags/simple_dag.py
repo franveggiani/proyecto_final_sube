@@ -285,9 +285,11 @@ def merge_and_transform(**kwargs):
         right_on=['fecha_feriado']
     )
     
-    # Eliminar columnas como en Colab
-    df_final = df_final.drop(columns=["tipo", "lat", "lon"])
-    df_final["grupo"] = "Grupo 17"
+    # Crear columna is_feriado basada en si hay match con feriados
+    df_final["is_feriado"] = df_final["fecha_feriado"].notna().astype(int)
+    
+    # Eliminar columnas innecesarias pero mantener información de feriados
+    df_final = df_final.drop(columns=["lat", "lon"])
 
     out = f"{OUTPUT_DIR}/final_single_day_{date}.csv"
     df_final.to_csv(out, index=False)

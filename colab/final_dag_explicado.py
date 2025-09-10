@@ -360,7 +360,9 @@ def merge_and_transform(sube_path: str, feriados_path: str, weather_path: str, d
             SELECT
                 s.*,
                 w.tmax, w.tmin, w.precip, w.viento,
-                'Grupo 17' AS grupo
+                CASE WHEN f.fecha IS NOT NULL THEN 1 ELSE 0 END AS is_feriado,
+                f.tipo AS tipo_feriado,
+                f.nombre AS nombre_feriado
             FROM read_csv_auto('{sube_path}', SAMPLE_SIZE=-1) AS s
             LEFT JOIN read_csv_auto('{weather_path}', SAMPLE_SIZE=-1) AS w
                 ON CAST(s.fecha AS DATE) = TRY_CAST(w.fecha AS DATE)

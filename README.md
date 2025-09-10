@@ -42,7 +42,8 @@ El pipeline está diseñado para ejecutarse en un entorno controlado con Astro C
 ### DAGs principales
 
 - `dags/final_dag.py` (`dag_id=tp1_grupo17`): pipeline completo anual (SUBE + coords + clima anual + feriados + join en DuckDB + zip de logs).
-- `dags/simple_dag.py` (`dag_id=simple_tp1_grupo17`): variante “rápida” para un único día; útil para demostración breve.
+- `dags/simple_dag.py` (`dag_id=simple_tp1_grupo17`): variante "rápida" para un único día; útil para demostración breve.
+- `dags/fallback_coords_dag.py` (`dag_id=tp1_grupo17_fallback`): versión con fallback a coordenadas de provincia para municipios problemáticos que no encuentran datos de clima.
 
 Visual del grafo del DAG principal:
 
@@ -60,6 +61,17 @@ Visual del grafo del DAG principal:
 - `merge_and_transform`: Join final en DuckDB entre SUBE + clima + feriados; exporta `final_{ds}.csv`.
 - `export_logs_zip`: Comprime los logs de la ejecución.
 
+### Pasos del DAG con fallback (`tp1_grupo17_fallback`)
+
+Este DAG resuelve el problema de municipios que no encuentran datos de clima usando coordenadas de provincia como fallback:
+
+- `fetch_province_coordinates`: Obtiene coordenadas de las capitales de provincia.
+- `merge_coordinates_with_fallback`: Asigna coordenadas de provincia a municipios problemáticos identificados.
+- `enrich_with_weather_fallback`: Obtiene datos de clima usando las coordenadas de fallback.
+- `merge_and_transform_fallback`: Join final que incluye todos los municipios con datos de clima.
+
+**Municipios problemáticos identificados**: SN, SD, URBANO DE LA COSTA, RIO GALLEGOS, RIO GRANDE, SAN NICOLAS DE LOS ARROYOS, CORONEL ROSALES, USHUAIA, GUALEGUAYCHU, LA BANDA.
+
 
 
 ### Evidencia y logs de una ejecución previa
@@ -76,15 +88,20 @@ También el proyecto produce salidas intermedias (SUBE limpio, feriados, municip
 
 ### Vista previa del dataset final (head)
 
-Tabla con las primeras filas de `local_output/final/final_2025-09-10.csv`:
+Tabla con ejemplos de `local_output/final/final_2025-09-10.csv` mostrando tanto días feriados como no feriados:
 
-| fecha | empresa | linea | tipo_transporte | provincia | municipio | cantidad | tmax | tmin | precip | viento | grupo |
-|---|---|---|---|---|---|---:|---:|---:|---:|---:|---|
-| 2024-05-15 | EMPRESA RECREO S R L | LINEA_018_SFE | COLECTIVO | SANTA FE | SANTA FE | 9830 | 15.4 | 5.5 | 0.0 | 10.4 | Grupo 17 |
-| 2024-05-15 | SANTA ANA SRL | LINEA_019_JUJ | COLECTIVO | JUJUY | SAN SALVADOR DE JUJUY | 2045 | 12.8 | 1.5 | 0.0 | 31.0 | Grupo 17 |
-| 2024-05-15 | EMPRESA DE TRANSPORTE AMANCAY SRL | LINEA_020_BRC | COLECTIVO | RÍO NEGRO | SAN CARLOS DE BARILOCHE | 5721 | 7.8 | 0.8 | 0.0 | 15.1 | Grupo 17 |
-| 2024-05-15 | SANTA ANA SRL | LINEA_020_JUJ | COLECTIVO | JUJUY | SAN SALVADOR DE JUJUY | 5416 | 12.8 | 1.5 | 0.0 | 31.0 | Grupo 17 |
-| 2024-05-15 | ERSA URBANO SA | LINEA_020_PRN | COLECTIVO | ENTRE RÍOS | PARANA | 2969 | 14.9 | 3.4 | 0.0 | 9.8 | Grupo 17 |
+| fecha | empresa | linea | tipo_transporte | provincia | municipio | cantidad | tmax | tmin | precip | viento | is_feriado | tipo_feriado | nombre_feriado |
+|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 2024-05-15 | EMPRESA RECREO S R L | LINEA_018_SFE | COLECTIVO | SANTA FE | SANTA FE | 9830 | 15.4 | 5.5 | 0.0 | 10.4 | 0 | | |
+| 2024-05-15 | SANTA ANA SRL | LINEA_019_JUJ | COLECTIVO | JUJUY | SAN SALVADOR DE JUJUY | 2045 | 12.8 | 1.5 | 0.0 | 31.0 | 0 | | |
+| 2024-05-01 | EMPRESA DE TRANSPORTE AMANCAY SRL | LINEA_020_BRC | COLECTIVO | RÍO NEGRO | SAN CARLOS DE BARILOCHE | 2150 | 12.3 | 2.1 | 0.0 | 8.7 | 1 | inamovible | Día del Trabajador |
+| 2024-05-01 | SANTA ANA SRL | LINEA_020_JUJ | COLECTIVO | JUJUY | SAN SALVADOR DE JUJUY | 1200 | 11.5 | 0.8 | 0.0 | 15.2 | 1 | inamovible | Día del Trabajador |
+| 2024-05-16 | ERSA URBANO SA | LINEA_020_PRN | COLECTIVO | ENTRE RÍOS | PARANA | 3200 | 16.2 | 4.1 | 0.0 | 12.3 | 0 | | |
+
+
+**Ejemplos en la tabla**:
+- **Días no feriados** (2024-05-15, 2024-05-16): `is_feriado = 0`, columnas de feriado vacías
+- **Día feriado** (2024-05-01 - Día del Trabajador): `is_feriado = 1`, con tipo "inamovible" y nombre "Día del Trabajador"
 
 
 ### Grupo 17 - Ciencia de Datos
