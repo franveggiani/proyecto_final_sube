@@ -7,8 +7,6 @@ import unicodedata
 import re
 from math import isnan
 
-"""DAG y utilidades para integrar datos SUBE, feriados y clima."""
-
 # -----------------------
 # Configuración
 # -----------------------
@@ -44,7 +42,6 @@ tz = "America/Argentina/Mendoza"
 # --- helper seguro por si hay NaN ---
 
 def _safe_norm(x):
-    """Normaliza texto de forma defensiva, devolviendo el valor original ante errores."""
     try:
         return normalize_text(x) if isinstance(x, str) else x
     except Exception:
@@ -228,7 +225,6 @@ def download_sube_csv(**kwargs):
     return urls
 
 def download_feriados(**kwargs):
-    """Descarga feriados para cada año de `SUBE_YEARS` y devuelve los paths locales."""
     paths = []
     os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
 
@@ -250,7 +246,6 @@ def download_feriados(**kwargs):
     return paths
 
 def extract_feriados(**kwargs):
-    """Combina los feriados descargados, agrega metadatos por año y elimina duplicados."""
     ti = kwargs["ti"]
     source_paths = ti.xcom_pull(task_ids="download_feriados") or []
 
@@ -294,7 +289,7 @@ def normalize_text(texto):
     return normalized.lower()
 
 def extract_sube(**kwargs):
-    """Extracción mejorada de datos SUBE con normalización consistente"""
+    """Extracción de datos SUBE con normalización consistente"""
     ti = kwargs["ti"]
     source_paths = ti.xcom_pull(task_ids="download_sube_csv") or []
 
@@ -327,7 +322,13 @@ def extract_sube(**kwargs):
     df["provincia"] = df["provincia"].apply(normalize_text)
     df["municipio"] = df["municipio"].apply(normalize_text)
 
-    # Eliminar columnas como en Colab
+    # Por las dudas, normalizamos el campo amba antes de filtrar
+    df["amba"] = df["amba"].astype(str).str.strip().str.lower()
+    
+    # Filtramos para tener solamente los registros del AMBA
+    df = df.loc[df["amba"].eq("si")].copy()
+
+    # Eliminamos columnas innecesarias
     df = df.drop(columns=["dato_preliminar", "amba", "jurisdiccion"])
     
     # Debug: mostrar algunos municipios únicos para verificar normalización
@@ -343,7 +344,7 @@ def extract_sube(**kwargs):
     return out
 
 def merge_coordinates(**kwargs):
-    """Merge mejorado de coordenadas con datos SUBE"""
+    """Merge de coordenadas con datos SUBE"""
     ti = kwargs["ti"]
     sube_path = ti.xcom_pull(task_ids="extract_sube")
     
@@ -472,7 +473,7 @@ def enrich_with_weather(**kwargs):
                     registros_municipio += 1
                 
                 if registros_municipio == 0:
-                    print(f"  ⚠️  Sin datos diarios para {provincia} - {municipio}")
+                    print(f"Sin datos diarios para {provincia} - {municipio}")
        
         except Exception as e:
             errores += 1
@@ -601,7 +602,6 @@ def merge_and_transform(**kwargs):
     return out
 
 def export_logs_zip(**kwargs):
-    """Comprime los logs del DAG en un ZIP por fecha de ejecución."""
     date = kwargs["ds"]
     dag_id = kwargs["dag"].dag_id
     logs_dir = f"/usr/local/airflow/logs/dag_id={dag_id}"
