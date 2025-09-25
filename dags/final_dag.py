@@ -10,7 +10,10 @@ from math import isnan
 # -----------------------
 # Configuración
 # -----------------------
-SUBE_YEARS = (2023, 2024)
+# Años de corrida
+SUBE_YEAR = datetime.now().year
+SUBE_YEARS = (SUBE_YEAR-2, SUBE_YEAR-1, SUBE_YEAR)
+#SUBE_YEARS = (2022,2023, 2024)
 SUBE_URL_TEMPLATE = "https://archivos-datos.transporte.gob.ar/upload/Dat_Ab_Usos/dat-ab-usos-{year}.csv"
 FERIADOS_URL_TEMPLATE = "https://api.argentinadatos.com/v1/feriados/{year}"
 LOCAL_DATA_DIR = "/usr/local/airflow/logs/data"
